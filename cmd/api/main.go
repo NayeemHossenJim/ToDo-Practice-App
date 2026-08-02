@@ -1,46 +1,19 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
-	"strconv"
-	"strings"
+	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+
+	"github.com/NayeemHossenJim/ToDo-Practice-App/internal/database"
+	"github.com/NayeemHossenJim/ToDo-Practice-App/internal/db"
+	"github.com/NayeemHossenJim/ToDo-Practice-App/internal/todo"
 )
-
-type Todo struct {
-	ID        int64  `json:"id"`
-	Title     string `json:"title"`
-	Completed bool   `json:"completed"`
-}
-
-type CreateTodoRequest struct {
-	Title string `json:"title" binding:"required,max=200"`
-}
-
-var todos = []Todo{
-	{
-		ID:        1,
-		Title:     "Learn Go structs",
-		Completed: true,
-	},
-	{
-		ID:        2,
-		Title:     "Learn Go slices",
-		Completed: false,
-	},
-	{
-		ID:        3,
-		Title:     "Build a Todo API",
-		Completed: false,
-	},
-	{
-		ID:        4,
-		Title:     "Learn Gin",
-		Completed: true,
-	},
-}
 
 func pingHandler(context *gin.Context) {
 	context.JSON(http.StatusOK, gin.H{
@@ -48,90 +21,49 @@ func pingHandler(context *gin.Context) {
 	})
 }
 
-func listTodosHandler(context *gin.Context) {
-	context.JSON(http.StatusOK, todos)
-}
-
-func getTodoHandler(context *gin.Context) {
-	idText := context.Param("id")
-
-	id, parseError := strconv.ParseInt(idText, 10, 64)
-	if parseError != nil {
-		context.JSON(http.StatusBadRequest, gin.H{
-			"error": "todo ID must be a number",
-		})
-		return
-	}
-
-	for _, todo := range todos {
-		if todo.ID == id {
-			context.JSON(http.StatusOK, todo)
-			return
-		}
-	}
-
-	context.JSON(http.StatusNotFound, gin.H{
-		"error": "todo not found",
-	})
-}
-
-func nextTodoID() int64 {
-	var highestID int64
-
-	for _, todo := range todos {
-		if todo.ID > highestID {
-			highestID = todo.ID
-		}
-	}
-
-	return highestID + 1
-}
-
-func createTodoHandler(context *gin.Context) {
-	var request CreateTodoRequest
-
-	bindingError := context.ShouldBindJSON(&request)
-	if bindingError != nil {
-		context.JSON(http.StatusBadRequest, gin.H{
-			"error": "title is required and must not exceed 200 characters",
-		})
-		return
-	}
-
-	title := strings.TrimSpace(request.Title)
-	if title == "" {
-		context.JSON(http.StatusBadRequest, gin.H{
-			"error": "title cannot be empty",
-		})
-		return
-	}
-
-	newTodo := Todo{
-		ID:        nextTodoID(),
-		Title:     title,
-		Completed: false,
-	}
-
-	todos = append(todos, newTodo)
-
-	context.JSON(http.StatusCreated, newTodo)
-}
-
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println(
+			"could not load .env; using system environment variables",
+		)
+	}
+
+	databaseURL := os.Getenv("DATABASE_URL")
+
+	startupContext, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	pool, err := database.NewPostgresPool(
+		startupContext,
+		databaseURL,
+	)
+	if err != nil {
+		log.Fatal("failed to connect to PostgreSQL: ", err)
+	}
+	defer pool.Close()
+
+	log.Println("Connected to PostgreSQL")
+
+	queries := db.New(pool)
+	todoHandler := todo.NewHandler(queries)
+
 	router := gin.Default()
 
-	proxyError := router.SetTrustedProxies(nil)
-	if proxyError != nil {
-		log.Fatal("failed to configure trusted proxies: ", proxyError)
+	if err := router.SetTrustedProxies(nil); err != nil {
+		log.Fatal("failed to configure trusted proxies: ", err)
 	}
 
 	router.GET("/ping", pingHandler)
-	router.GET("/todos", listTodosHandler)
-	router.GET("/todos/:id", getTodoHandler)
-	router.POST("/todos", createTodoHandler)
+	router.GET("/todos", todoHandler.List)
+	router.GET("/todos/:id", todoHandler.Get)
+	router.POST("/todos", todoHandler.Create)
+	router.PUT("/todos/:id", todoHandler.Update)
+	router.DELETE("/todos/:id", todoHandler.Delete)
 
-	serverError := router.Run(":8080")
-	if serverError != nil {
-		log.Fatal("server failed to start: ", serverError)
+	if err := router.Run(":8080"); err != nil {
+		log.Fatal("server failed to start: ", err)
 	}
 }
