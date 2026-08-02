@@ -2,34 +2,50 @@ package database
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/fx"
+
+	"github.com/NayeemHossenJim/ToDo-Practice-App/internal/config"
 )
 
 func NewPostgresPool(
-	ctx context.Context,
-	databaseURL string,
+	lifecycle fx.Lifecycle,
+	applicationConfig config.Config,
 ) (*pgxpool.Pool, error) {
-	if databaseURL == "" {
-		return nil, errors.New("DATABASE_URL is required")
-	}
-
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(
+		applicationConfig.DatabaseURL,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
 
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	pool, err := pgxpool.NewWithConfig(
+		context.Background(),
+		poolConfig,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
 	}
 
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
-	}
+	lifecycle.Append(fx.Hook{
+		OnStart: func(context context.Context) error {
+			if err := pool.Ping(context); err != nil {
+				pool.Close()
+				return fmt.Errorf("ping PostgreSQL: %w", err)
+			}
+
+			log.Println("Connected to PostgreSQL")
+			return nil
+		},
+		OnStop: func(context.Context) error {
+			log.Println("Closing PostgreSQL pool")
+			pool.Close()
+			return nil
+		},
+	})
 
 	return pool, nil
 }
